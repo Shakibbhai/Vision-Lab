@@ -132,17 +132,22 @@ class PersonViTEncoder:
                 continue
             image = self._cv2.cvtColor(crop, self._cv2.COLOR_BGR2RGB)
             image = self._cv2.resize(image, (128, 256), interpolation=self._cv2.INTER_LINEAR)
-            tensor = torch.from_numpy(image).float().permute(2, 0, 1) / 255.0
-            batch.append(tensor)
+            batch.append(image)
 
         if not batch:
             return None
-        stacked = torch.stack(batch).to(self._device)
+
+        import numpy as np
+
+        # Ship uint8 to the device once and normalize there; per-crop float conversion on CPU dominated encode time
+        stacked = torch.from_numpy(np.stack(batch)).to(self._device, non_blocking=True)
+        stacked = stacked.permute(0, 3, 1, 2).float().div_(255.0)
         stacked = (stacked - self._mean) / self._std
 
-        with torch.no_grad():
+        use_fp16 = self._device.type == "cuda"
+        with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16, enabled=use_fp16):
             embeddings = self._model(stacked)
-            embeddings = torch.nn.functional.normalize(embeddings, dim=1)
+        embeddings = torch.nn.functional.normalize(embeddings.float(), dim=1)
         return embeddings.detach().cpu().numpy().astype("float32")
 
     @property
