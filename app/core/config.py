@@ -80,6 +80,8 @@ class Settings(BaseSettings):
     personvit_use_reid: bool = True
     personvit_reid_weights: str = "./data/models/personvit/checkpoint0260.pth"
     personvit_similarity_threshold: float = 0.44
+    # Live overlay: cosine threshold on track-averaged fused PersonViT+OSNet embeddings
+    reid_match_threshold: float = 0.75
     personvit_trust_checkpoint: bool = True
     bytetrack_track_thresh: float = 0.25
     bytetrack_match_thresh: float = 0.8
