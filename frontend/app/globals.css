@@ -1,0 +1,130 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --font-headline: "Avenir Next", "Trebuchet MS", "Segoe UI", sans-serif;
+  --font-body: "IBM Plex Sans", "Avenir Next", "Segoe UI", sans-serif;
+  --background: 42 67% 96%;
+  --foreground: 212 40% 14%;
+  --card: 40 70% 98%;
+  --card-foreground: 212 40% 14%;
+  --popover: 40 70% 98%;
+  --popover-foreground: 212 40% 14%;
+  --primary: 186 90% 28%;
+  --primary-foreground: 0 0% 98%;
+  --secondary: 31 92% 52%;
+  --secondary-foreground: 212 40% 12%;
+  --muted: 39 30% 89%;
+  --muted-foreground: 212 20% 36%;
+  --accent: 165 62% 84%;
+  --accent-foreground: 212 40% 14%;
+  --destructive: 6 78% 54%;
+  --destructive-foreground: 0 0% 98%;
+  --border: 196 24% 78%;
+  --input: 196 24% 78%;
+  --ring: 186 90% 28%;
+  --radius: 0.8rem;
+}
+
+* {
+  @apply border-border;
+}
+
+body {
+  @apply bg-background text-foreground antialiased;
+  background-image:
+    radial-gradient(circle at 10% 10%, rgba(20, 184, 166, 0.22), transparent 35%),
+    radial-gradient(circle at 88% 0%, rgba(249, 115, 22, 0.2), transparent 30%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.55), rgba(255, 255, 255, 0.72));
+  background-attachment: fixed;
+}
+
+main {
+  position: relative;
+}
+
+main::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background-image: linear-gradient(rgba(15, 23, 42, 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(15, 23, 42, 0.035) 1px, transparent 1px);
+  background-size: 32px 32px;
+  opacity: 0.45;
+}
+
+.dashboard-panel {
+  @apply border border-white/60 bg-white/75 backdrop-blur-sm;
+  box-shadow: 0 10px 40px rgba(6, 24, 44, 0.08);
+}
+
+.stagger-1 {
+  animation-delay: 80ms;
+}
+
+.stagger-2 {
+  animation-delay: 160ms;
+}
+
+.stagger-3 {
+  animation-delay: 240ms;
+}
+
+/* ─── Dialog ─── */
+.dialog-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(15, 23, 42, 0.45);
+  backdrop-filter: blur(4px);
+  animation: dialog-fade-in 180ms ease-out;
+}
+
+.dialog-panel {
+  display: flex;
+  flex-direction: column;
+  width: min(680px, 92vw);
+  max-height: 82vh;
+  border-radius: 1rem;
+  border: 1px solid hsl(var(--border) / 0.6);
+  background: hsl(var(--card));
+  box-shadow: 0 20px 60px rgba(6, 24, 44, 0.18), 0 0 0 1px rgba(255, 255, 255, 0.5) inset;
+  animation: dialog-slide-up 220ms ease-out;
+  overflow: hidden;
+}
+
+@keyframes dialog-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+@keyframes dialog-slide-up {
+  from { opacity: 0; transform: translateY(12px) scale(0.97); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* ─── File browser rows ─── */
+.file-browser-row {
+  @apply flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm transition-colors;
+  @apply hover:bg-accent/60;
+}
+
+/* ─── PolygonCanvas ─── */
+.polygon-canvas-container {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 200px;
+}
+
+.polygon-canvas {
+  display: block;
+  margin: 0 auto;
+  border-radius: 0.5rem;
+}

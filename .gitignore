@@ -1,0 +1,61 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+build/
+dist/
+*.egg-info/
+.venv/
+venv/
+env/
+ENV/
+
+# Node / frontend
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/dist/
+frontend/.turbo/
+frontend/.cache/
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Local runtime artifacts
+*.log
+*.pid
+
+
+# Model weights and checkpoints (large binary files)
+
+*.pt
+*.pth
+*.h5
+*.part
+
+# Data and Model
+data/
+
+# Database
+*.db
+# MD File
+*.md
+!README.md
+
+# TypeScript build cache
+*.tsbuildinfo

@@ -1,0 +1,78 @@
+x-service-defaults: &service-defaults
+  init: true
+  restart: unless-stopped
+  logging:
+    options:
+      max-size: "${DOCKER_LOG_MAX_SIZE:-10m}"
+      max-file: "${DOCKER_LOG_MAX_FILE:-3}"
+
+x-api-base: &api-base "${NEXT_PUBLIC_API_BASE:-http://backend:9000}"
+
+x-backend-env: &backend-env
+  SERVICE_ROLE: "${SERVICE_ROLE:-fetcher}"
+  DATABASE_URL: "${DATABASE_URL:-sqlite+aiosqlite:///./data/app.db}"
+  SQLITE_JOURNAL_MODE: "${SQLITE_JOURNAL_MODE:-DELETE}"
+  RTSP_INTERNAL_HOST: "${RTSP_INTERNAL_HOST:-host.docker.internal}"
+  ANALYTICS_USE_YOLO: "${ANALYTICS_USE_YOLO:-true}"
+  FRAME_INTERVAL_SECONDS: "${FRAME_INTERVAL_SECONDS:-0.04}"
+  MJPEG_JPEG_QUALITY: "${MJPEG_JPEG_QUALITY:-80}"
+  SEGMENT_SCAN_SECONDS: "${SEGMENT_SCAN_SECONDS:-0.04}"
+  FACIAL_EXPRESSION_FACE_CONFIDENCE_THRESHOLD: "${FACIAL_EXPRESSION_FACE_CONFIDENCE_THRESHOLD:-0.01}"
+  FACIAL_EXPRESSION_REALTIME_INTERVAL_SECONDS: "${FACIAL_EXPRESSION_REALTIME_INTERVAL_SECONDS:-0.04}"
+  FACIAL_EXPRESSION_REALTIME_CACHE_TTL_SECONDS: "${FACIAL_EXPRESSION_REALTIME_CACHE_TTL_SECONDS:-0.4}"
+  YOLO_MODEL_PATH: "${YOLO_MODEL_PATH:-./data/models/best.pt}"
+  YOLO_CONFIDENCE: "${YOLO_CONFIDENCE:-0.3}"
+  BOXMOT_REID_WEIGHTS: "${BOXMOT_REID_WEIGHTS:-./data/models/osnet_x0_25_msmt17.pt}"
+  BOXMOT_DEVICE: "${BOXMOT_DEVICE:-cuda:0}"
+  PERSONVIT_REID_WEIGHTS: "${PERSONVIT_REID_WEIGHTS:-./data/models/personvit/checkpoint0260.pth}"
+  PERSONVIT_USE_REID: "${PERSONVIT_USE_REID:-true}"
+  PERSONVIT_SIMILARITY_THRESHOLD: "${PERSONVIT_SIMILARITY_THRESHOLD:-0.6}"
+  FACIAL_EXPRESSION_DEVICE: "${FACIAL_EXPRESSION_DEVICE:-cuda:0}"
+
+services:
+  backend:
+    <<: *service-defaults
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "${BACKEND_PORT:-9000}:9000"
+    environment: *backend-env
+    volumes:
+      - ./data:/app/data
+      - deepface-cache:/root/.deepface
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [ gpu ]
+    healthcheck:
+      test: [ "CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9000/health', timeout=3)" ]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 600s
+
+  frontend:
+    <<: *service-defaults
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+      args:
+        NEXT_PUBLIC_API_BASE: *api-base
+    environment:
+      NEXT_PUBLIC_API_BASE: *api-base
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+# deepface models are now stored in ./data/deepface (bind mount) — no named volume needed
+
+volumes:
+  deepface-cache:

@@ -1,0 +1,671 @@
+#!/usr/bin/env python3
+"""
+Multi-Camera YOLO11s + StrongSORT + PersonViT with Cross-Camera Re-ID
+
+Your folder:
+  /mnt/disk1/Hasin
+Files:
+  ./camera1_multi.mp4
+  ./camera9_multi.mp4
+  ./yolo11s.pt
+  ./osnet_x1_0_msmt17.pt
+  ./weights/vitb.lup.256x128.wopt.csk.4-8.ar.375.n8/checkpoint0260.pth
+
+Outputs:
+  ./runs/multicam/
+    camera1/
+      tracked.mp4
+      crops/id_*/
+      embeddings/id_*.npy
+      trajectories.csv
+    camera9/
+      tracked.mp4
+      crops/id_*/
+      embeddings/id_*.npy
+      trajectories.csv
+    cross_camera_matches.json
+    unified_trajectories.csv
+    global_id_mapping.json
+"""
+
+import argparse
+import csv
+import json
+import importlib
+import inspect
+from collections import defaultdict, deque
+from pathlib import Path
+
+import cv2
+import numpy as np
+import torch
+import torch.nn.functional as F
+from ultralytics import YOLO
+import boxmot
+
+
+# -------------------------------------------------------
+# Robust import for create_tracker
+# -------------------------------------------------------
+def import_create_tracker():
+    try:
+        from boxmot import create_tracker
+        return create_tracker
+    except Exception:
+        pass
+
+    for m in [
+        "boxmot.tracker_zoo",
+        "boxmot.zoo",
+        "boxmot.utils",
+        "boxmot.tracking.zoo",
+    ]:
+        try:
+            mod = importlib.import_module(m)
+            if hasattr(mod, "create_tracker"):
+                return mod.create_tracker
+        except Exception:
+            pass
+
+    raise ImportError("create_tracker not found in boxmot installation")
+
+
+create_tracker = import_create_tracker()
+
+
+# -------------------------------------------------------
+# Safe torch.load
+# -------------------------------------------------------
+def safe_torch_load_checkpoint(path: Path, device: torch.device, trust_personvit: bool):
+    sig = inspect.signature(torch.load)
+    supports_weights_only = "weights_only" in sig.parameters
+
+    if not supports_weights_only:
+        return torch.load(str(path), map_location=device)
+
+    allow = []
+    for modname in ["numpy.core.multiarray", "numpy._core.multiarray"]:
+        try:
+            mod = importlib.import_module(modname)
+            if hasattr(mod, "scalar"):
+                allow.append(getattr(mod, "scalar"))
+        except Exception:
+            pass
+
+    for modname in ["numpy", "numpy.core", "numpy._core"]:
+        try:
+            mod = importlib.import_module(modname)
+            if hasattr(mod, "dtype"):
+                allow.append(getattr(mod, "dtype"))
+        except Exception:
+            pass
+
+    uniq = []
+    seen = set()
+    for obj in allow:
+        key = (getattr(obj, "__module__", ""), getattr(obj, "__name__", str(obj)))
+        if key not in seen:
+            seen.add(key)
+            uniq.append(obj)
+
+    try:
+        with torch.serialization.safe_globals(uniq):
+            return torch.load(str(path), map_location=device, weights_only=True)
+    except Exception as e:
+        if trust_personvit:
+            print("\n[WARN] Falling back to weights_only=False\n")
+            return torch.load(str(path), map_location=device, weights_only=False)
+        raise RuntimeError(
+            f"Failed to load checkpoint. Use --trust_personvit if you trust the file.\n{e}"
+        ) from e
+
+
+# -------------------------------------------------------
+# PersonViT Encoder
+# -------------------------------------------------------
+class PersonViTEncoder:
+    def __init__(self, ckpt_path: Path, device: str, trust_personvit: bool):
+        try:
+            import timm
+        except ImportError as e:
+            raise ImportError("Please install timm: pip install timm") from e
+
+        if device != "cpu" and not torch.cuda.is_available():
+            device = "cpu"
+        self.device = torch.device(device)
+
+        ckpt = safe_torch_load_checkpoint(ckpt_path, self.device, trust_personvit)
+
+        if isinstance(ckpt, dict) and "model" in ckpt:
+            state = ckpt["model"]
+        elif isinstance(ckpt, dict) and "state_dict" in ckpt:
+            state = ckpt["state_dict"]
+        elif isinstance(ckpt, dict):
+            state = ckpt
+        else:
+            raise ValueError("Unsupported checkpoint format")
+
+        state = {k.replace("module.", ""): v for k, v in state.items()}
+
+        self.model = timm.create_model(
+            "vit_base_patch16_224",
+            pretrained=False,
+            num_classes=0,
+            global_pool="token",
+            img_size=(256, 128),
+        )
+
+        model_keys = set(self.model.state_dict().keys())
+
+        filtered = {}
+        for k, v in state.items():
+            if k.startswith("head") or k.startswith("classifier"):
+                continue
+            if k in model_keys:
+                if k in self.model.state_dict():
+                    model_shape = self.model.state_dict()[k].shape
+                    if v.shape == model_shape:
+                        filtered[k] = v
+
+        missing, unexpected = self.model.load_state_dict(filtered, strict=False)
+        self.model.to(self.device).eval()
+
+        self.mean = torch.tensor([0.485, 0.456, 0.406], device=self.device).view(1, 3, 1, 1)
+        self.std = torch.tensor([0.229, 0.224, 0.225], device=self.device).view(1, 3, 1, 1)
+
+        print(f"[PersonViT] Loaded: {ckpt_path.name}")
+        print(f"[PersonViT] Keys: {len(filtered)} used | {len(missing)} missing | {len(unexpected)} unexpected")
+
+    @torch.no_grad()
+    def encode_crops_bgr(self, crops_bgr: list) -> np.ndarray | None:
+        if not crops_bgr:
+            return None
+
+        xs = []
+        for img in crops_bgr:
+            if img is None or img.size == 0:
+                continue
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            img = cv2.resize(img, (128, 256), interpolation=cv2.INTER_LINEAR)
+            t = torch.from_numpy(img).float().permute(2, 0, 1) / 255.0
+            xs.append(t)
+
+        if not xs:
+            return None
+
+        x = torch.stack(xs).to(self.device)
+        x = (x - self.mean) / self.std
+
+        feats = self.model(x)
+        feats = F.normalize(feats, dim=1)
+        return feats.detach().cpu().numpy().astype(np.float32)
+
+
+# -------------------------------------------------------
+# Global Re-ID Manager (Cross-Camera)
+# -------------------------------------------------------
+class GlobalReIDManager:
+    """
+    Manages person embeddings across multiple cameras.
+    Assigns global IDs that persist across camera views.
+    """
+    
+    def __init__(self, similarity_threshold=0.60):
+        self.similarity_threshold = similarity_threshold
+        
+        # Global ID counter
+        self.next_global_id = 1
+        
+        # Map (camera_id, local_track_id) -> global_id
+        self.local_to_global = {}
+        
+        # Store embeddings: global_id -> list of embeddings
+        self.global_embeddings = defaultdict(list)
+        
+        # Average embeddings: global_id -> avg_embedding
+        self.avg_embeddings = {}
+        
+        # Last seen: global_id -> {camera_id: frame_id}
+        self.last_seen = defaultdict(dict)
+        
+        # Track history: global_id -> list of (camera_id, frame_id, bbox)
+        self.track_history = defaultdict(list)
+        
+        # Cross-camera transitions: list of {global_id, from_cam, to_cam, frame}
+        self.transitions = []
+        
+    def get_global_id(self, camera_id: str, local_tid: int, 
+                      embedding: np.ndarray, frame_id: int,
+                      bbox: list = None) -> tuple[int, bool]:
+        """
+        Get or create global ID for a local track.
+        
+        Returns:
+            (global_id, is_new_match) where is_new_match=True if matched across cameras
+        """
+        key = (camera_id, local_tid)
+        
+        # If already mapped, return existing global ID
+        if key in self.local_to_global:
+            global_id = self.local_to_global[key]
+            self._update_embedding(global_id, embedding, camera_id, frame_id, bbox)
+            return global_id, False
+        
+        # Try to match against existing global IDs from OTHER cameras
+        matched_id, similarity, from_camera = self._match_cross_camera(
+            embedding, camera_id, frame_id
+        )
+        
+        is_cross_camera = False
+        if matched_id is not None:
+            # Match found across cameras!
+            global_id = matched_id
+            is_cross_camera = True
+            self.transitions.append({
+                'global_id': global_id,
+                'from_camera': from_camera,
+                'to_camera': camera_id,
+                'frame': frame_id,
+                'similarity': float(similarity)
+            })
+            print(f"   🔄 Cross-camera match: Global ID {global_id} "
+                  f"{from_camera} → {camera_id} (sim: {similarity:.3f})")
+        else:
+            # No match, create new global ID
+            global_id = self.next_global_id
+            self.next_global_id += 1
+        
+        # Register mapping
+        self.local_to_global[key] = global_id
+        self._update_embedding(global_id, embedding, camera_id, frame_id, bbox)
+        
+        return global_id, is_cross_camera
+    
+    def _match_cross_camera(self, embedding: np.ndarray, current_camera: str,
+                           current_frame: int, time_window=150) -> tuple[int | None, float, str | None]:
+        """
+        Match embedding against global IDs from OTHER cameras.
+        
+        Returns:
+            (matched_global_id, similarity, source_camera) or (None, 0.0, None)
+        """
+        best_match = None
+        best_similarity = 0.0
+        best_camera = None
+        
+        for global_id, avg_emb in self.avg_embeddings.items():
+            # Check if this global ID was recently seen in OTHER cameras
+            recent_cameras = []
+            for cam_id, last_frame in self.last_seen[global_id].items():
+                if cam_id != current_camera:
+                    frame_diff = current_frame - last_frame
+                    if 0 <= frame_diff <= time_window:
+                        recent_cameras.append((cam_id, frame_diff))
+            
+            if not recent_cameras:
+                continue
+            
+            # Compute similarity
+            similarity = float(np.dot(embedding, avg_emb))
+            
+            if similarity > best_similarity and similarity > self.similarity_threshold:
+                best_similarity = similarity
+                best_match = global_id
+                # Find most recent camera
+                best_camera = min(recent_cameras, key=lambda x: x[1])[0]
+        
+        return best_match, best_similarity, best_camera
+    
+    def _update_embedding(self, global_id: int, embedding: np.ndarray,
+                         camera_id: str, frame_id: int, bbox: list = None):
+        """Update embeddings and tracking info for a global ID"""
+        self.global_embeddings[global_id].append(embedding)
+        
+        # Keep only recent embeddings (last 200)
+        if len(self.global_embeddings[global_id]) > 200:
+            self.global_embeddings[global_id] = self.global_embeddings[global_id][-200:]
+        
+        # Update average
+        self.avg_embeddings[global_id] = np.mean(
+            self.global_embeddings[global_id], axis=0
+        ).astype(np.float32)
+        
+        # Update last seen
+        self.last_seen[global_id][camera_id] = frame_id
+        
+        # Update history
+        if bbox is not None:
+            self.track_history[global_id].append({
+                'camera': camera_id,
+                'frame': frame_id,
+                'bbox': bbox
+            })
+
+
+# -------------------------------------------------------
+# Helpers
+# -------------------------------------------------------
+def crop_from_frame(frame, box_xyxy):
+    h, w = frame.shape[:2]
+    x1, y1, x2, y2 = map(int, box_xyxy)
+    x1 = max(0, min(x1, w - 1))
+    y1 = max(0, min(y1, h - 1))
+    x2 = max(0, min(x2, w - 1))
+    y2 = max(0, min(y2, h - 1))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    c = frame[y1:y2, x1:x2]
+    if c.size == 0:
+        return None
+    return c
+
+
+def parse_tracks(out):
+    if out is None:
+        return []
+    arr = np.asarray(out)
+    if arr.size == 0:
+        return []
+    if arr.ndim == 1:
+        arr = arr[None, :]
+    tracks = []
+    for r in arr:
+        if len(r) >= 5:
+            tid = int(r[4])
+            box = r[:4].astype(float)
+            tracks.append((tid, box))
+    return tracks
+
+
+# -------------------------------------------------------
+# Process Single Camera
+# -------------------------------------------------------
+def process_camera(camera_name: str, video_path: Path, detector, encoder,
+                   reid_manager: GlobalReIDManager, tracker_cfg: Path,
+                   osnet_weights: Path, device: str, output_dir: Path):
+    """
+    Process a single camera video with global re-identification.
+    """
+    print(f"\n📹 Processing {camera_name}: {video_path.name}")
+    
+    half = device.startswith("cuda")
+    
+    # Create tracker for this camera
+    tracker = create_tracker(
+        "strongsort",
+        tracker_cfg,
+        str(osnet_weights),
+        device,
+        half,
+        False,
+    )
+    
+    # Setup output directories
+    cam_out = output_dir / camera_name
+    crops_dir = cam_out / "crops"
+    embs_dir = cam_out / "embeddings"
+    cam_out.mkdir(parents=True, exist_ok=True)
+    crops_dir.mkdir(parents=True, exist_ok=True)
+    embs_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Open video
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"Could not open: {video_path}")
+    
+    fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+    W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    
+    vw = cv2.VideoWriter(
+        str(cam_out / "tracked.mp4"),
+        cv2.VideoWriter_fourcc(*"mp4v"),
+        fps,
+        (W, H),
+    )
+    
+    traj_csv = []
+    trails = defaultdict(lambda: deque(maxlen=100))
+    
+    # Track embeddings per global ID
+    emb_sum = defaultdict(lambda: np.zeros(768, dtype=np.float32))
+    emb_cnt = defaultdict(int)
+    
+    # Track cross-camera matches
+    cross_cam_frames = set()  # Frames where cross-camera match occurred
+    
+    fid = 0
+    print(f"   Resolution: {W}x{H} | FPS: {fps:.2f} | Frames: {total_frames}")
+    
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            break
+        fid += 1
+        
+        if fid % 100 == 0:
+            print(f"   {camera_name} Frame {fid}/{total_frames} ({100*fid/total_frames:.1f}%)")
+        
+        # Detect persons
+        r = detector.predict(
+            frame,
+            conf=0.35,
+            iou=0.5,
+            device=device,
+            classes=[0],
+            verbose=False,
+        )[0]
+        
+        if r.boxes is None or len(r.boxes) == 0:
+            dets = np.empty((0, 6), dtype=np.float32)
+        else:
+            dets = np.concatenate(
+                [
+                    r.boxes.xyxy.cpu().numpy(),
+                    r.boxes.conf.cpu().numpy()[:, None],
+                    r.boxes.cls.cpu().numpy()[:, None],
+                ],
+                axis=1,
+            ).astype(np.float32)
+        
+        # Track
+        out = tracker.update(dets, frame)
+        tracks = parse_tracks(out)
+        
+        batch_crops, batch_tids, batch_boxes = [], [], []
+        
+        for local_tid, box in tracks:
+            c = crop_from_frame(frame, box)
+            if c is not None:
+                batch_crops.append(c)
+                batch_tids.append(local_tid)
+                batch_boxes.append(box)
+        
+        # Get embeddings
+        if batch_crops:
+            feats = encoder.encode_crops_bgr(batch_crops)
+            if feats is not None and len(feats) == len(batch_tids):
+                for local_tid, fvec, box in zip(batch_tids, feats, batch_boxes):
+                    # Get global ID (with cross-camera matching)
+                    global_id, is_cross_cam = reid_manager.get_global_id(
+                        camera_name, local_tid, fvec, fid, bbox=box.tolist()
+                    )
+                    
+                    if is_cross_cam:
+                        cross_cam_frames.add(fid)
+                    
+                    # Accumulate embeddings
+                    emb_sum[global_id] += fvec
+                    emb_cnt[global_id] += 1
+                    
+                    # Save crop
+                    id_dir = crops_dir / f"global_id_{global_id}"
+                    id_dir.mkdir(parents=True, exist_ok=True)
+                    cv2.imwrite(str(id_dir / f"{fid:06d}.jpg"), 
+                               crop_from_frame(frame, box))
+                    
+                    # Record trajectory
+                    x1, y1, x2, y2 = map(int, box.tolist())
+                    traj_csv.append([fid, global_id, x1, y1, x2, y2])
+                    
+                    # Update trail
+                    cx = int((box[0] + box[2]) / 2)
+                    cy = int((box[1] + box[3]) / 2)
+                    trails[global_id].append((cx, cy))
+                    
+                    # Draw
+                    color = (0, 255, 255) if fid in cross_cam_frames else (0, 255, 0)
+                    label = f"ID {global_id}"
+                    if fid in cross_cam_frames:
+                        label += " (Cross-Cam)"
+                    
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                    cv2.putText(frame, label, (x1, max(0, y1 - 5)),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+        
+        # Draw trails
+        for gid, pts in trails.items():
+            pts = list(pts)
+            for i in range(1, len(pts)):
+                cv2.line(frame, pts[i - 1], pts[i], (255, 255, 0), 2)
+        
+        # Add camera label
+        cv2.putText(frame, camera_name.upper(), (20, 40),
+                   cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 3)
+        
+        vw.write(frame)
+    
+    cap.release()
+    vw.release()
+    
+    # Save average embeddings
+    for gid in emb_sum.keys():
+        mean_vec = emb_sum[gid] / max(1, emb_cnt[gid])
+        np.save(str(embs_dir / f"global_id_{gid}.npy"), mean_vec)
+    
+    # Save trajectories
+    with open(cam_out / "trajectories.csv", "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["frame", "global_id", "x1", "y1", "x2", "y2"])
+        w.writerows(traj_csv)
+    
+    print(f"   ✅ {camera_name} complete: {len(set(t[1] for t in traj_csv))} unique IDs")
+
+
+# -------------------------------------------------------
+# Main
+# -------------------------------------------------------
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--trust_personvit", action="store_true")
+    ap.add_argument("--cross_cam_threshold", type=float, default=0.75,
+                    help="Similarity threshold for cross-camera matching (0-1)")
+    ap.add_argument("--time_window", type=int, default=150,
+                    help="Max frame difference for cross-camera matching")
+    args = ap.parse_args()
+
+    ROOT = Path.cwd()
+    print("📂 Working Directory:", ROOT)
+
+    # Input files
+    CAM1_VIDEO = ROOT / "camera1_multi.mp4"
+    CAM9_VIDEO = ROOT / "camera9_multi.mp4"
+    YOLO_W = ROOT / "yolo11s.pt"
+    OSNET_W = ROOT / "osnet_x1_0_msmt17.pt"
+    PERSONVIT_W = ROOT / "weights" / "vitb.lup.256x128.wopt.csk.4-8.ar.375.n8" / "checkpoint0260.pth"
+
+    for p in [CAM1_VIDEO, CAM9_VIDEO, YOLO_W, OSNET_W, PERSONVIT_W]:
+        if not p.exists():
+            raise FileNotFoundError(f"Missing file: {p}")
+
+    # Output directory
+    OUT = ROOT / "runs" / "multicam"
+    OUT.mkdir(parents=True, exist_ok=True)
+
+    device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    print(f"🔧 Device: {device}")
+
+    # Load shared models
+    print("🔍 Loading YOLO detector...")
+    detector = YOLO(str(YOLO_W))
+
+    print("🎨 Loading PersonViT encoder...")
+    encoder = PersonViTEncoder(PERSONVIT_W, device=device, trust_personvit=args.trust_personvit)
+
+    # Find tracker config
+    pkg_dir = Path(boxmot.__file__).resolve().parent
+    cfgs = list(pkg_dir.rglob("strongsort.yaml"))
+    if not cfgs:
+        raise FileNotFoundError(f"Could not find strongsort.yaml in {pkg_dir}")
+    tracker_cfg = cfgs[0]
+
+    # Create global re-ID manager
+    print(f"🌐 Initializing Global Re-ID (threshold: {args.cross_cam_threshold})")
+    reid_manager = GlobalReIDManager(similarity_threshold=args.cross_cam_threshold)
+
+    # Process both cameras
+    cameras = [
+        ("camera1", CAM1_VIDEO),
+        ("camera9", CAM9_VIDEO),
+    ]
+
+    for cam_name, cam_video in cameras:
+        process_camera(
+            cam_name, cam_video, detector, encoder, reid_manager,
+            tracker_cfg, OSNET_W, device, OUT
+        )
+
+    # Save cross-camera analysis
+    print("\n📊 Saving cross-camera analysis...")
+    
+    # Cross-camera transitions
+    with open(OUT / "cross_camera_matches.json", "w") as f:
+        json.dump({
+            'transitions': reid_manager.transitions,
+            'total_transitions': len(reid_manager.transitions),
+            'unique_global_ids': len(reid_manager.avg_embeddings)
+        }, f, indent=2)
+    
+    # Global ID mapping
+    mapping = {}
+    for (cam, local_tid), global_id in reid_manager.local_to_global.items():
+        if global_id not in mapping:
+            mapping[global_id] = {}
+        mapping[global_id][cam] = local_tid
+    
+    with open(OUT / "global_id_mapping.json", "w") as f:
+        json.dump(mapping, f, indent=2)
+    
+    # Unified trajectories
+    unified_traj = []
+    for global_id, history in reid_manager.track_history.items():
+        for entry in history:
+            unified_traj.append([
+                entry['frame'],
+                global_id,
+                entry['camera'],
+                *entry['bbox']
+            ])
+    
+    with open(OUT / "unified_trajectories.csv", "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["frame", "global_id", "camera", "x1", "y1", "x2", "y2"])
+        w.writerows(sorted(unified_traj, key=lambda x: (x[0], x[1])))
+
+    print(f"\n✅ All done! Output: {OUT.resolve()}")
+    print(f"   Total global IDs: {len(reid_manager.avg_embeddings)}")
+    print(f"   Cross-camera transitions: {len(reid_manager.transitions)}")
+    
+    # Print transition summary
+    if reid_manager.transitions:
+        print("\n🔄 Cross-camera transitions detected:")
+        for trans in reid_manager.transitions[:10]:  # Show first 10
+            print(f"     ID {trans['global_id']}: {trans['from_camera']} → {trans['to_camera']} "
+                  f"@ frame {trans['frame']} (sim: {trans['similarity']:.3f})")
+        if len(reid_manager.transitions) > 10:
+            print(f"     ... and {len(reid_manager.transitions) - 10} more")
+
+
+if __name__ == "__main__":
+    main()
