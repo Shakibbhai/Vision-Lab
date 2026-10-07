@@ -15,7 +15,8 @@ REMOTE=$(git rev-parse origin/main)
 
 echo "$(date -Is) deploying ${LOCAL:0:7} -> ${REMOTE:0:7}"
 CHANGED=$(git diff --name-only "$LOCAL" "$REMOTE")
-git merge -q --ff-only origin/main
+# reset (not merge) so rewritten/force-pushed history still deploys; .env and data/ are untracked
+git reset -q --hard origin/main
 
 if grep -q '^requirements.txt$' <<<"$CHANGED"; then
     source /venv/main/bin/activate
