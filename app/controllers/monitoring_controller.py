@@ -925,11 +925,16 @@ async def realtime(session: AsyncSession, camera_ids: list[int] | None = None):
         if stream and stream.last_heartbeat:
             heartbeat_fresh = datetime.utcnow() - stream.last_heartbeat <= heartbeat_timeout
         stream_running = stream is not None and stream_status == "running" and (heartbeat_fresh or frame_fresh)
-        if stream is None and frame_fresh:
+        # Browser webcams push frames without a backend stream; any other source (e.g. an uploaded
+        # video's thumbnail frame) must not be reported live until its stream is actually started.
+        browser_pushed_live = (
+            stream is None and frame_fresh and (camera.rtsp_url or "").startswith("webcam://")
+        )
+        if browser_pushed_live:
             stream_status = "running"
         elif stream and stream_status == "running" and not stream_running:
             stream_status = "stopped"
-        has_live_frame = has_frame and (stream_running or (stream is None and frame_fresh))
+        has_live_frame = has_frame and (stream_running or browser_pushed_live)
 
         if analytics_running and has_live_frame and latest_frame:
             result = await _get_realtime_count_snapshot(service, camera.id, latest_frame.path, zones)
