@@ -57,6 +57,8 @@ class Settings(BaseSettings):
     uploads_dir: str = "./data/uploads"
     sqlite_journal_mode: str = "DELETE"
     frame_interval_seconds: float = 0.04
+    # Floor on frame_interval_seconds (1.0 = at most 1 captured frame/s). Lower it on GPU hosts.
+    min_capture_interval_seconds: float = 1.0
     analytics_processing_fps: float = 5.0
     mjpeg_jpeg_quality: int = 80
     reconstructions_dir: str = "./data/reconstructions"

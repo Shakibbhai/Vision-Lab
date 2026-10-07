@@ -24,8 +24,6 @@ from app.db.models import Frame, FrameStatus, Stream, StreamStatus
 
 logger = logging.getLogger(__name__)
 
-_MIN_CAPTURE_INTERVAL_SECONDS = 1.0
-
 
 @dataclass
 class IngestionEvent:
@@ -227,7 +225,7 @@ def _run_ingestion(
     if frame_interval_seconds is None:
         frame_interval_seconds = settings.frame_interval_seconds
 
-    capture_interval_seconds = max(float(frame_interval_seconds), _MIN_CAPTURE_INTERVAL_SECONDS)
+    capture_interval_seconds = max(float(frame_interval_seconds), float(settings.min_capture_interval_seconds), 0.01)
     fps_value = max(0.1, 1.0 / max(capture_interval_seconds, 1e-6))
     scan_sleep_seconds = max(
         0.005,
