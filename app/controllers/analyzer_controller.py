@@ -4,12 +4,15 @@ import asyncio
 import logging
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 from fastapi import BackgroundTasks, HTTPException
+from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.controllers.stream_controller import _file_path_from_uri
 from app.core.config import fetcher_enabled
 from app.db import crud
 from app.db.models import AnalysisJobStatus
@@ -20,9 +23,12 @@ from app.models.analyzer import (
     FacialExpressionRecognitionRequest,
     TotalPersonDetectionRequest,
     FaceRecognitionRequest,
+    ReidVideoJobResponse,
+    ReidVideoRequest,
 )
 from app.services.recognition.facial_expression_recognition import FacialExpressionRecognitionService
 from app.services.tracking.person_tracking import PersonTrackingService
+from app.services.tracking.reid_video_export import get_reid_video_export_service
 from app.services.detection.total_person_detection import TotalPersonDetectionService
 from app.services.recognition.face_recognition import FaceRecognitionService
 
@@ -538,4 +544,50 @@ def _job_to_response(job) -> AnalysisJobResponse:
         unique_persons=job.unique_persons,
         error=job.error,
         created_at=job.created_at.isoformat(),
+    )
+
+
+async def start_reid_video(session: AsyncSession, request: ReidVideoRequest) -> ReidVideoJobResponse:
+    camera = await crud.get_camera(session, request.camera_id)
+    if not camera:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    if not (camera.rtsp_url or "").startswith("file://"):
+        raise HTTPException(status_code=400, detail="Re-ID video export is available for uploaded video sources only")
+    video_path = Path(_file_path_from_uri(camera.rtsp_url))
+
+    zone = None
+    if request.zone_id is not None:
+        zone = await crud.get_zone(session, request.zone_id)
+        if not zone or zone.camera_id != camera.id:
+            raise HTTPException(status_code=404, detail="Zone not found for this camera")
+
+    job = get_reid_video_export_service().start(camera.id, video_path, zone)
+    return _reid_video_response(job)
+
+
+async def get_reid_video(job_id: str) -> ReidVideoJobResponse:
+    job = get_reid_video_export_service().get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Re-ID video job not found")
+    return _reid_video_response(job)
+
+
+async def download_reid_video(job_id: str):
+    job = get_reid_video_export_service().get(job_id)
+    if not job or job.status != "completed" or not job.output_path or not Path(job.output_path).exists():
+        raise HTTPException(status_code=404, detail="Re-ID video is not ready")
+    return FileResponse(job.output_path, media_type="video/mp4",
+                        filename=f"person_reid_camera{job.camera_id}_{job.id}.mp4")
+
+
+def _reid_video_response(job) -> ReidVideoJobResponse:
+    return ReidVideoJobResponse(
+        job_id=job.id,
+        camera_id=job.camera_id,
+        zone_id=job.zone_id,
+        status=job.status,
+        progress=round(job.progress, 3),
+        unique_persons=job.unique_persons,
+        error=job.error,
+        download_url=f"/api/analyzer/reid-video/{job.id}/download" if job.status == "completed" else None,
     )

@@ -127,3 +127,19 @@ class FaceRecognitionResponse(BaseModel):
     analyzed_faces: int
     recognized_persons_counts: dict[str, int]
     series: list[FaceRecognitionFrameResult]
+
+
+class ReidVideoRequest(BaseModel):
+    camera_id: int
+    zone_id: int | None = None
+
+
+class ReidVideoJobResponse(BaseModel):
+    job_id: str
+    camera_id: int
+    zone_id: int | None
+    status: str
+    progress: float
+    unique_persons: int
+    error: str | None = None
+    download_url: str | None = None

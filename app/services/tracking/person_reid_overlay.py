@@ -186,13 +186,29 @@ class PersonReidOverlayService:
     def error_message(self) -> str:
         return self._init_error or "Person reid overlay service is unavailable"
 
+    def reset(self) -> None:
+        """Forget all tracks and identities (models stay loaded); IDs restart from 1."""
+        with self._state_guard:
+            self._camera_states.clear()
+            self._camera_locks.clear()
+        with self._gallery_lock:
+            self._gallery.clear()
+            self._next_global_id = 1
+
+    def identity_count(self) -> int:
+        """Distinct persons remembered (provisional IDs merged into a known person are not counted)."""
+        with self._gallery_lock:
+            return sum(1 for identity in self._gallery.values() if identity.count > 0)
+
     def render_overlay(
         self,
         camera_id: int,
         frame_token: str,
         image: Any,
         zone: Any | None = None,
+        now: float | None = None,
     ) -> dict[str, Any]:
+        """Track and draw persons on `image`. `now` (seconds) lets offline rendering use video time."""
         if not self.is_available() or image is None:
             return {"frame": image, "active_tracks": 0}
 
@@ -203,19 +219,23 @@ class PersonReidOverlayService:
         zone_scope_key = self._zone_scope_key(zone)
         state_key = (int(camera_id), zone_scope_key)
         zone_polygons = self._resolve_zone_polygons(zone, frame_w, frame_h)
-        now = time.monotonic()
+        now = time.monotonic() if now is None else now
         self._prune_stale_states(now)
 
         lock = self._get_camera_lock(state_key)
         with lock:
             state = self._get_or_create_state(state_key, frame_w, frame_h, now)
             if state.last_frame_token != frame_token:
-                state.tracked_rows = self._track_people(state, image, zone_polygons)
+                state.tracked_rows = self._track_people(state, image, zone_polygons, now)
                 state.last_frame_token = frame_token
                 state.updated_at_monotonic = now
 
             rendered = self._draw_tracked_rows(image, state.tracked_rows, zone_polygons)
-            return {"frame": rendered, "active_tracks": len(state.tracked_rows)}
+            return {
+                "frame": rendered,
+                "active_tracks": len(state.tracked_rows),
+                "track_ids": [row["track_id"] for row in state.tracked_rows],
+            }
 
     def _resolve_zone_polygons(
         self,
@@ -344,8 +364,8 @@ class PersonReidOverlayService:
         state: _CameraTrackState,
         image: Any,
         zone_polygons: list[list[tuple[int, int]]],
+        now: float,
     ) -> list[dict[str, Any]]:
-        now = time.monotonic()
         detections = self._detect_people(image)
         tracked_raw = state.tracker.update(detections, image)
         tracked = ensure_bytetrack_outputs(tracked_raw, self._np)
@@ -648,11 +668,14 @@ def _box_iou(a: dict[str, Any], b: dict[str, Any]) -> float:
     return inter / union if union > 0 else 0.0
 
 
+# BGR colours that stay distinguishable side by side; consecutive IDs get clearly different colours
+_TRACK_PALETTE = (
+    (230, 120, 20), (40, 40, 220), (40, 170, 40), (0, 160, 240), (180, 50, 180), (200, 180, 0),
+    (60, 90, 160), (120, 0, 230), (0, 210, 160), (160, 160, 40), (90, 20, 120), (20, 120, 255),
+)
+
+
 def _track_color(track_id: int) -> tuple[int, int, int]:
     if track_id < 0:
         return (120, 120, 120)
-    return (
-        int((37 * track_id + 17) % 255),
-        int((17 * track_id + 113) % 255),
-        int((29 * track_id + 53) % 255),
-    )
+    return _TRACK_PALETTE[(track_id - 1) % len(_TRACK_PALETTE)]

@@ -833,6 +833,28 @@ export async function getReconstruction(jobId: number) {
   return request<ReconstructionJob>(`/api/reconstructions/${jobId}`);
 }
 
+export type ReidVideoJob = {
+  job_id: string;
+  camera_id: number;
+  zone_id: number | null;
+  status: "queued" | "running" | "completed" | "failed";
+  progress: number;
+  unique_persons: number;
+  error: string | null;
+  download_url: string | null;
+};
+
+export async function startReidVideo(cameraId: number, zoneId?: number | null) {
+  return request<ReidVideoJob>("/api/analyzer/reid-video", {
+    method: "POST",
+    body: JSON.stringify({ camera_id: cameraId, zone_id: zoneId ?? null }),
+  });
+}
+
+export async function getReidVideo(jobId: string) {
+  return request<ReidVideoJob>(`/api/analyzer/reid-video/${jobId}`);
+}
+
 export type FaceReferenceModel = {
   id: number;
   name: string;

@@ -3,9 +3,26 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { type AnalyzerJob, type AnalyzerStats, type AnalyzerTrack, getAnalyzerStats, getAnalyzerTracks, listAnalyzerJobs, createReconstruction, getReconstruction } from "@/lib/api";
 import { parseSelectedZoneId } from "@/lib/zone-selection";
-import { Loader2, RefreshCcw, User, Video, PlaySquare } from "lucide-react";
+import { Download, Loader2, RefreshCcw, User, Video, PlaySquare } from "lucide-react";
+import { ReidVideoExportCard } from "@/components/v2/reid-video-export-card";
 
 export function PersonReidAnalyticsPanel({
+  cameraId,
+  selectedZoneId = "",
+}: {
+  cameraId: number;
+  selectedZoneId?: string;
+}) {
+  const zoneId = useMemo(() => parseSelectedZoneId(selectedZoneId), [selectedZoneId]);
+  return (
+    <div className="space-y-4">
+      <ReidVideoExportCard cameraId={cameraId} zoneId={zoneId} />
+      <PersonReidJobsSection cameraId={cameraId} selectedZoneId={selectedZoneId} />
+    </div>
+  );
+}
+
+function PersonReidJobsSection({
   cameraId,
   selectedZoneId = "",
 }: {
@@ -298,6 +315,15 @@ export function PersonReidAnalyticsPanel({
             {generatingVideo && <Loader2 className="w-4 h-4 text-indigo-600 animate-spin ml-2" />}
             {reconstructionStatus && (!playbackUrl || !videoReady) && (
               <span className="text-xs font-medium text-indigo-700 ml-2">{reconstructionStatus}</span>
+            )}
+            {reconstructionVideoUrl && videoReady && (
+              <a
+                href={reconstructionVideoUrl}
+                download={`trajectory_job${selectedJob?.id ?? ""}.mp4`}
+                className="ml-auto flex items-center gap-1.5 rounded-md border border-indigo-600 bg-white px-3 py-1.5 text-xs font-semibold text-indigo-700 transition hover:bg-indigo-50"
+              >
+                <Download className="h-4 w-4" /> Download Video
+              </a>
             )}
           </div>
           

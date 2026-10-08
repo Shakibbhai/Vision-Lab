@@ -16,6 +16,8 @@ from app.models.analyzer import (
     TotalPersonDetectionResponse,
     FaceRecognitionRequest,
     FaceRecognitionResponse,
+    ReidVideoJobResponse,
+    ReidVideoRequest,
 )
 
 router = APIRouter(prefix="/analyzer", tags=["analyzer"])
@@ -111,3 +113,21 @@ async def get_person_tracks(
     session: AsyncSession = Depends(get_session),
 ):
     return await analyzer_controller.get_person_tracks(session, job_id, zone_id)
+
+
+@router.post("/reid-video", response_model=ReidVideoJobResponse)
+async def start_reid_video(
+    request: ReidVideoRequest,
+    session: AsyncSession = Depends(get_session),
+):
+    return await analyzer_controller.start_reid_video(session, request)
+
+
+@router.get("/reid-video/{job_id}", response_model=ReidVideoJobResponse)
+async def get_reid_video(job_id: str):
+    return await analyzer_controller.get_reid_video(job_id)
+
+
+@router.get("/reid-video/{job_id}/download")
+async def download_reid_video(job_id: str):
+    return await analyzer_controller.download_reid_video(job_id)
