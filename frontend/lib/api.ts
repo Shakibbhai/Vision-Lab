@@ -844,11 +844,23 @@ export type ReidVideoJob = {
   download_url: string | null;
 };
 
-export async function startReidVideo(cameraId: number, zoneId?: number | null) {
+/** Returns the saved (or in-progress) result when one exists for the same video and Re-ID settings. */
+export async function startReidVideo(cameraId: number, zoneId?: number | null, force = false) {
   return request<ReidVideoJob>("/api/analyzer/reid-video", {
     method: "POST",
-    body: JSON.stringify({ camera_id: cameraId, zone_id: zoneId ?? null }),
+    body: JSON.stringify({ camera_id: cameraId, zone_id: zoneId ?? null, force }),
   });
+}
+
+/** Saved or in-progress Re-ID video for this source, or null when none exists for the current settings. */
+export async function getLatestReidVideo(cameraId: number, zoneId?: number | null): Promise<ReidVideoJob | null> {
+  const response = await fetch(
+    `/api/backend${withQuery("/api/analyzer/reid-video", { camera_id: cameraId, zone_id: zoneId ?? undefined })}`,
+    { cache: "no-store" },
+  );
+  if (response.status === 404) return null;
+  if (!response.ok) throw new Error(await parseError(response));
+  return (await response.json()) as ReidVideoJob;
 }
 
 export async function getReidVideo(jobId: string) {

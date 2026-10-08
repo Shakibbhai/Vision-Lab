@@ -548,7 +548,21 @@ def _job_to_response(job) -> AnalysisJobResponse:
 
 
 async def start_reid_video(session: AsyncSession, request: ReidVideoRequest) -> ReidVideoJobResponse:
-    camera = await crud.get_camera(session, request.camera_id)
+    camera_id, video_path, zone = await _reid_video_source(session, request.camera_id, request.zone_id)
+    job = get_reid_video_export_service().start(camera_id, video_path, zone, force=request.force)
+    return _reid_video_response(job)
+
+
+async def get_latest_reid_video(session: AsyncSession, camera_id: int, zone_id: int | None) -> ReidVideoJobResponse:
+    camera_id, video_path, zone = await _reid_video_source(session, camera_id, zone_id)
+    job = get_reid_video_export_service().latest(camera_id, video_path, zone)
+    if not job:
+        raise HTTPException(status_code=404, detail="No Re-ID video for this source and settings yet")
+    return _reid_video_response(job)
+
+
+async def _reid_video_source(session: AsyncSession, camera_id: int, zone_id: int | None):
+    camera = await crud.get_camera(session, camera_id)
     if not camera:
         raise HTTPException(status_code=404, detail="Camera not found")
     if not (camera.rtsp_url or "").startswith("file://"):
@@ -556,13 +570,11 @@ async def start_reid_video(session: AsyncSession, request: ReidVideoRequest) -> 
     video_path = Path(_file_path_from_uri(camera.rtsp_url))
 
     zone = None
-    if request.zone_id is not None:
-        zone = await crud.get_zone(session, request.zone_id)
+    if zone_id is not None:
+        zone = await crud.get_zone(session, zone_id)
         if not zone or zone.camera_id != camera.id:
             raise HTTPException(status_code=404, detail="Zone not found for this camera")
-
-    job = get_reid_video_export_service().start(camera.id, video_path, zone)
-    return _reid_video_response(job)
+    return camera.id, video_path, zone
 
 
 async def get_reid_video(job_id: str) -> ReidVideoJobResponse:

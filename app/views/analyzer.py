@@ -123,6 +123,15 @@ async def start_reid_video(
     return await analyzer_controller.start_reid_video(session, request)
 
 
+@router.get("/reid-video", response_model=ReidVideoJobResponse)
+async def get_latest_reid_video(
+    camera_id: int = Query(...),
+    zone_id: int | None = Query(default=None),
+    session: AsyncSession = Depends(get_session),
+):
+    return await analyzer_controller.get_latest_reid_video(session, camera_id, zone_id)
+
+
 @router.get("/reid-video/{job_id}", response_model=ReidVideoJobResponse)
 async def get_reid_video(job_id: str):
     return await analyzer_controller.get_reid_video(job_id)

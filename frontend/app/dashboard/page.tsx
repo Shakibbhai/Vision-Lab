@@ -17,6 +17,7 @@ import {
 import { isZoneFilterSelected, parseSelectedZoneId } from "@/lib/zone-selection";
 import { usePageVisibility } from "@/hooks/use-page-visibility";
 import { useSourcesData } from "@/hooks/use-sources-data";
+import { ReidDownloadButton } from "@/components/v2/reid-download-button";
 import {
   CameraFeed,
   MiniLineChart,
@@ -758,6 +759,9 @@ export default function DashboardPage() {
                     </p>
                     <div className="mt-2.5 flex items-center justify-end gap-2">
                       <div className="flex items-center gap-1.5">
+                        {source.type === "Video File" ? (
+                          <ReidDownloadButton cameraId={source.camera.id} cameraName={source.camera.name} />
+                        ) : null}
                         <button
                           type="button"
                           className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-primary/40 bg-primary/10 text-primary transition hover:bg-primary/20 disabled:cursor-not-allowed disabled:opacity-60"

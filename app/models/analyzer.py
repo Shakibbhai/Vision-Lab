@@ -132,6 +132,7 @@ class FaceRecognitionResponse(BaseModel):
 class ReidVideoRequest(BaseModel):
     camera_id: int
     zone_id: int | None = None
+    force: bool = False  # re-render even when a saved result for the same video and settings exists
 
 
 class ReidVideoJobResponse(BaseModel):
