@@ -7,9 +7,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from app.core.config import settings
+from app.core.config import _resolve_project_path, settings
 from app.services.tracking.boxmot_utils import (
     create_bytetrack_tracker,
+    create_reid_encoder,
     ensure_bytetrack_outputs,
     resolve_tracker_config_path,
 )
@@ -30,10 +31,9 @@ _EXEMPLAR_DIVERSITY = 0.9
 # Keep drawing a track's last box this long after the detector misses it
 _COAST_SECONDS = 1.5
 _COAST_MAX_IOU = 0.5
+# A crop is not used for Re-ID when another person's box covers more than this share of it
+_OCCLUSION_LIMIT = 0.15
 _GALLERY_TTL_SECONDS = 1800.0
-# Single-model fallbacks when only one encoder loads (fused threshold comes from settings)
-_VIT_ONLY_THRESHOLD = 0.70
-_OSNET_ONLY_THRESHOLD = 0.84
 
 
 @dataclass(slots=True)
@@ -83,7 +83,7 @@ class PersonReidOverlayService:
         self._tracker_config_path: Path | None = None
         self._person_class_ids: list[int] = [0]
         self._personvit_encoder: Any = None
-        self._osnet_encoder: Any = None
+        self._reid_encoders: list[tuple[str, Any]] = []
         self._reid_threshold: float = 0.75
 
         self._camera_states: dict[tuple[int, str], _CameraTrackState] = {}
@@ -115,14 +115,10 @@ class PersonReidOverlayService:
             self._np = np
             self._person_class_ids = resolve_person_class_ids(self._yolo)
 
-            self._init_personvit_encoder()
-            self._init_osnet_encoder()
-            if self._personvit_encoder is not None and self._osnet_encoder is not None:
-                self._reid_threshold = float(settings.reid_match_threshold)
-            elif self._personvit_encoder is not None:
-                self._reid_threshold = _VIT_ONLY_THRESHOLD
-            else:
-                self._reid_threshold = _OSNET_ONLY_THRESHOLD
+            if settings.reid_overlay_use_personvit:
+                self._init_personvit_encoder()
+            self._init_reid_encoders()
+            self._reid_threshold = float(settings.reid_match_threshold)
             self._available = True
         except Exception as exc:  # noqa: BLE001
             self._init_error = str(exc)
@@ -162,20 +158,19 @@ class PersonReidOverlayService:
             logger.warning("PersonReidOverlayService: PersonViT encoder init notice: %s", exc)
             self._personvit_encoder = None
 
-    def _init_osnet_encoder(self) -> None:
-        """Load the supervised OSNet Re-ID model; fused with PersonViT it separates look-alikes far better."""
-        try:
-            from boxmot.reid.core.auto_backend import ReidAutoBackend  # type: ignore
-
-            weights = Path(settings.boxmot_reid_weights)
+    def _init_reid_encoders(self) -> None:
+        """Load the configured BoxMOT Re-ID models (e.g. CLIP-ReID, OSNet); their embeddings are fused."""
+        configured = [item.strip() for item in settings.reid_overlay_weights.split(",") if item.strip()]
+        for raw in configured or [settings.boxmot_reid_weights]:
+            weights = Path(_resolve_project_path(raw))
             if not weights.exists():
-                logger.info("PersonReidOverlayService: OSNet weights not found at %s", weights)
-                return
-            self._osnet_encoder = ReidAutoBackend(weights=weights, device=settings.boxmot_device, half=False).model
-            logger.info("PersonReidOverlayService: OSNet encoder active from %s", weights)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("PersonReidOverlayService: OSNet encoder init notice: %s", exc)
-            self._osnet_encoder = None
+                logger.warning("PersonReidOverlayService: Re-ID weights not found at %s", weights)
+                continue
+            try:
+                self._reid_encoders.append((weights.name, create_reid_encoder(weights, settings.boxmot_device)))
+                logger.info("PersonReidOverlayService: Re-ID encoder active from %s", weights)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("PersonReidOverlayService: Re-ID encoder %s failed to load: %s", weights, exc)
 
     def is_available(self) -> bool:
         return (
@@ -381,7 +376,17 @@ class PersonReidOverlayService:
                 continue
             visible.append((track_id, {"x1": x1, "y1": y1, "x2": x2, "y2": y2}))
 
-        embeddings = self._embed(image, [box for _, box in visible])
+        # Crops overlapped by another person mix two appearances; on the test videos dropping them raised
+        # same-person matching from ~64% to ~99% at a 1% false-merge rate. They are drawn but never learned.
+        all_boxes = [box for _, box in visible]
+        clean_idx = [i for i, box in enumerate(all_boxes)
+                     if not any(_coverage(box, other) > _OCCLUSION_LIMIT for other in all_boxes if other is not box)]
+        clean_embeddings = self._embed(image, [all_boxes[i] for i in clean_idx])
+        embeddings = None
+        if clean_embeddings is not None:
+            embeddings = [None] * len(visible)
+            for i, embedding in zip(clean_idx, clean_embeddings):
+                embeddings[i] = embedding
 
         with self._gallery_lock:
             for idx, (local_id, _box) in enumerate(visible):
@@ -411,8 +416,8 @@ class PersonReidOverlayService:
         return rows
 
     def _embed(self, image: Any, boxes: list[dict[str, Any]]) -> Any:
-        """Fused, L2-normalized PersonViT+OSNet embeddings (dot product = mean of the two cosines)."""
-        if not boxes or (self._personvit_encoder is None and self._osnet_encoder is None):
+        """Fused, L2-normalized embeddings of all encoders (dot product = mean of their cosines)."""
+        if not boxes or (self._personvit_encoder is None and not self._reid_encoders):
             return None
         np = self._np
         parts = []
@@ -420,9 +425,10 @@ class PersonReidOverlayService:
             if self._personvit_encoder is not None:
                 crops = [image[b["y1"]:b["y2"], b["x1"]:b["x2"]] for b in boxes]
                 parts.append(_l2_normalize(np, np.asarray(self._personvit_encoder.encode_crops_bgr(crops))))
-            if self._osnet_encoder is not None:
+            if self._reid_encoders:
                 xyxy = np.array([[b["x1"], b["y1"], b["x2"], b["y2"]] for b in boxes], dtype=np.float32)
-                parts.append(_l2_normalize(np, np.asarray(self._osnet_encoder.get_features(xyxy, image))))
+                for _name, encoder in self._reid_encoders:
+                    parts.append(_l2_normalize(np, np.asarray(encoder.get_features(xyxy, image))))
         except Exception as exc:  # noqa: BLE001
             logger.debug("Re-ID embedding failed: %s", exc)
             return None
@@ -624,6 +630,14 @@ def _point_in_any_polygon(
 def _l2_normalize(np: Any, vectors: Any) -> Any:
     norm = np.linalg.norm(vectors, axis=-1, keepdims=True)
     return vectors / np.maximum(norm, 1e-8)
+
+
+def _coverage(box: dict[str, Any], other: dict[str, Any]) -> float:
+    """Share of `box` covered by `other`."""
+    ix = max(0, min(box["x2"], other["x2"]) - max(box["x1"], other["x1"]))
+    iy = max(0, min(box["y2"], other["y2"]) - max(box["y1"], other["y1"]))
+    area = (box["x2"] - box["x1"]) * (box["y2"] - box["y1"])
+    return ix * iy / area if area > 0 else 0.0
 
 
 def _box_iou(a: dict[str, Any], b: dict[str, Any]) -> float:

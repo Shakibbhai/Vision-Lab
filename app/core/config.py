@@ -80,8 +80,12 @@ class Settings(BaseSettings):
     personvit_use_reid: bool = True
     personvit_reid_weights: str = "./data/models/personvit/checkpoint0260.pth"
     personvit_similarity_threshold: float = 0.44
-    # Live overlay: cosine threshold on track-averaged fused PersonViT+OSNet embeddings
+    # Live overlay: cosine threshold on track-averaged fused embeddings of the encoders below
     reid_match_threshold: float = 0.75
+    # Live overlay encoders: PersonViT (optional) plus comma-separated BoxMOT Re-ID weights, e.g.
+    # "./data/models/reid/clip_msmt17.pt". Empty falls back to boxmot_reid_weights.
+    reid_overlay_use_personvit: bool = True
+    reid_overlay_weights: str = ""
     personvit_trust_checkpoint: bool = True
     bytetrack_track_thresh: float = 0.25
     bytetrack_match_thresh: float = 0.8

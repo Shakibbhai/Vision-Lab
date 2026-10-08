@@ -23,6 +23,21 @@ def resolve_strongsort_config_path(boxmot_module: Any) -> Path:
     return resolve_tracker_config_path(boxmot_module, "strongsort")
 
 
+# Identity counts of Re-ID training sets missing from BoxMOT's table; the classifier shape must match the
+# checkpoint even though only the embedding is used (e.g. the official CLIP-ReID MSMT17 model).
+_EXTRA_REID_CLASS_COUNTS = {"msmt17": 1041}
+
+
+def create_reid_encoder(weights: Path, device: str) -> Any:
+    """Load a BoxMOT Re-ID model (OSNet, CLIP-ReID, ...); its get_features(xyxy, image) returns embeddings."""
+    from boxmot.reid.core import config as reid_config  # type: ignore
+    from boxmot.reid.core.auto_backend import ReidAutoBackend  # type: ignore
+
+    for dataset, classes in _EXTRA_REID_CLASS_COUNTS.items():
+        reid_config.NR_CLASSES_DICT.setdefault(dataset, classes)
+    return ReidAutoBackend(weights=Path(weights), device=device, half=False).model
+
+
 def create_strongsort_tracker(
     create_tracker_fn: Any,
     config_path: Path,
