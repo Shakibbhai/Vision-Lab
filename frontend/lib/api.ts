@@ -904,3 +904,59 @@ export async function deleteFace(faceId: number) {
     method: "DELETE",
   });
 }
+
+export type InsightsReid = {
+  zone: string;
+  unique_persons: number;
+  total_detections: number;
+  duration_seconds: number;
+  identities: { id: number; seconds: number }[];
+  timeline: [number, number][];
+  processed_at: number | null;
+  download_url: string;
+  job_id: string;
+};
+
+export type InsightsCamera = {
+  id: number;
+  name: string;
+  source_type: "Video File" | "RTSP" | "Webcam";
+  live: boolean;
+  zones: number;
+  frames: number;
+  entries: number;
+  exits: number;
+  unique_persons: number;
+  detections: number;
+  reid: InsightsReid | null;
+};
+
+export type InsightsOverview = {
+  generated_at: string;
+  totals: {
+    cameras: number;
+    live_cameras: number;
+    zones: number;
+    enrolled_faces: number;
+    frames_captured: number;
+    reid_videos: number;
+    unique_persons: number;
+    detections: number;
+    entries: number;
+    exits: number;
+  };
+  cameras: InsightsCamera[];
+  activity: { hour: string; frames: number; entries: number; exits: number }[];
+  queues: {
+    camera_id: number;
+    zone_id: number;
+    zone_name: string;
+    avg_wait_time_sec: number | null;
+    avg_queue_count: number;
+    max_queue_count: number;
+  }[];
+};
+
+export async function getInsightsOverview() {
+  return request<InsightsOverview>("/api/insights/overview");
+}

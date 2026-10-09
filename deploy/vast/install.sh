@@ -41,6 +41,18 @@ yaml.safe_dump(d, open(path, "w"), sort_keys=False)
 EOF
 rm -f /tmp/supervisor-skip/VisionLab
 
+# Dashboard login: create credentials once (never overwritten); change AUTH_PASSWORD here to set your own
+AUTH_ENV=/workspace/Vision-Lab/frontend/.env.local
+if [ ! -f "$AUTH_ENV" ]; then
+    umask 077
+    cat > "$AUTH_ENV" <<EOF
+AUTH_USERNAME=admin
+AUTH_PASSWORD=$(head -c 12 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 12)
+AUTH_SECRET=$(head -c 32 /dev/urandom | base64 | tr -dc 'A-Za-z0-9')
+EOF
+    echo "Created dashboard login in $AUTH_ENV"
+fi
+
 cat > /etc/cron.d/visionlab-autodeploy <<EOF
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 * * * * * root ${DEPLOY}/autodeploy.sh >> /var/log/portal/visionlab-autodeploy.log 2>&1

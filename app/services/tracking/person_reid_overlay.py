@@ -94,6 +94,8 @@ class PersonReidOverlayService:
         self._gallery: dict[int, _Identity] = {}
         self._gallery_lock = threading.Lock()
         self._next_global_id = 1
+        # Provisional ID -> the known identity it was re-identified as
+        self._aliases: dict[int, int] = {}
 
         if not settings.analytics_use_yolo:
             self._init_error = "YOLO analytics is disabled"
@@ -193,12 +195,17 @@ class PersonReidOverlayService:
             self._camera_locks.clear()
         with self._gallery_lock:
             self._gallery.clear()
+            self._aliases.clear()
             self._next_global_id = 1
 
-    def identity_count(self) -> int:
-        """Distinct persons remembered (provisional IDs merged into a known person are not counted)."""
+    def resolve_identity(self, global_id: int) -> int:
+        """Final identity for an ID shown earlier (follows provisional -> re-identified merges)."""
         with self._gallery_lock:
-            return sum(1 for identity in self._gallery.values() if identity.count > 0)
+            seen = set()
+            while global_id in self._aliases and global_id not in seen:
+                seen.add(global_id)
+                global_id = self._aliases[global_id]
+            return global_id
 
     def render_overlay(
         self,
@@ -510,6 +517,7 @@ class PersonReidOverlayService:
         return best
 
     def _merge_identity(self, source_id: int, into: int) -> None:
+        self._aliases[source_id] = into
         source = self._gallery.pop(source_id, None)
         target = self._gallery.get(into)
         if source is None or target is None or source.count == 0:

@@ -21,6 +21,8 @@ _OUTPUT_FPS_MAX = 10.0
 _OUTPUT_MAX_WIDTH = 1280
 _MAX_KEPT_JOBS = 20
 _INDEX_FILE = "reid_exports.json"
+_TIMELINE_POINTS = 120
+_MIN_PERSON_SECONDS = 1.0
 
 
 @dataclass(slots=True)
@@ -33,6 +35,11 @@ class ReidVideoJob:
     status: str = "queued"  # queued | running | completed | failed
     progress: float = 0.0
     unique_persons: int = 0
+    # Statistics of the processed video, kept in the index for the analytics pages
+    total_detections: int = 0
+    duration_seconds: float = 0.0
+    identities: list[dict[str, Any]] = field(default_factory=list)  # [{"id", "seconds"}] by screen time
+    timeline: list[list[float]] = field(default_factory=list)  # [[video second, persons in view]]
     output_path: str | None = None
     error: str | None = None
     created_at: float = field(default_factory=time.time)
@@ -133,6 +140,10 @@ class ReidVideoExportService:
         encoder = None
         size = (0, 0)
         index = 0
+        sample_seconds = step / source_fps
+        screen_time: dict[int, float] = {}
+        timeline: list[list[float]] = []
+        detections = 0
         try:
             while True:
                 ok, frame = capture.read()
@@ -145,6 +156,11 @@ class ReidVideoExportService:
                 result = renderer.render_overlay(job.camera_id, f"export-{job.id}-{index}", frame, zone=zone,
                                                  now=index / source_fps)
                 rendered = result["frame"]
+                shown = result.get("track_ids", [])
+                detections += len(shown)
+                timeline.append([round(index / source_fps, 2), len(shown)])
+                for track_id in shown:
+                    screen_time[track_id] = screen_time.get(track_id, 0.0) + sample_seconds
                 if encoder is None:
                     encoder, size = _open_encoder(output_path, rendered, source_fps / step)
                 if (rendered.shape[1], rendered.shape[0]) != size:
@@ -163,9 +179,27 @@ class ReidVideoExportService:
             raise RuntimeError("No frames could be read from the video")
         if return_code != 0:
             raise RuntimeError("ffmpeg failed to encode the output video")
-        job.unique_persons = renderer.identity_count()
+        job.total_detections = detections
+        job.duration_seconds = round(index / source_fps, 2)
+        merged: dict[int, float] = {}
+        for track_id, seconds in screen_time.items():  # time shown under a provisional ID counts for the person
+            final_id = renderer.resolve_identity(track_id)
+            merged[final_id] = merged.get(final_id, 0.0) + seconds
+        # A person must be on screen for a second to count; shorter IDs are detector flicker
+        job.identities = [{"id": pid, "seconds": round(sec, 1)}
+                          for pid, sec in sorted(merged.items(), key=lambda item: -item[1])
+                          if sec >= _MIN_PERSON_SECONDS]
+        job.unique_persons = len(job.identities)
+        stride = max(1, len(timeline) // _TIMELINE_POINTS)
+        job.timeline = [max(timeline[i:i + stride], key=lambda point: point[1])
+                        for i in range(0, len(timeline), stride)]
         job.output_path = str(output_path)
         job.progress = 1.0
+
+
+def saved_exports() -> dict[str, dict[str, Any]]:
+    """Index of saved Re-ID videos keyed "camera_id:zone" (entries whose video file still exists)."""
+    return {key: entry for key, entry in _read_index().items() if Path(entry.get("output_path", "")).exists()}
 
 
 def _cache_identity(camera_id: int, video_path: Path, zone: Any | None) -> tuple[str, str]:
@@ -206,6 +240,10 @@ def _save_to_index(job: ReidVideoJob) -> None:
         "signature": job.signature,
         "output_path": job.output_path,
         "unique_persons": job.unique_persons,
+        "total_detections": job.total_detections,
+        "duration_seconds": job.duration_seconds,
+        "identities": job.identities,
+        "timeline": job.timeline,
         "created_at": job.created_at,
     }
     path = _index_path()

@@ -5,8 +5,8 @@ import { ControlLayout } from "@/components/control-layout";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "VisionLab",
-  description: "Next.js dashboard for RTSP capture and analytics workflows",
+  title: "PersonVisionAi",
+  description: "Person detection and re-identification console",
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {

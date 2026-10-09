@@ -11,6 +11,7 @@ from app.views import (
     reconstructions,
     streams,
     faces,
+    insights,
 )
 
 PUBLIC_ROUTERS = [
@@ -22,6 +23,7 @@ PUBLIC_ROUTERS = [
     analyzer.router,
     media.router,
     faces.router,
+    insights.router,
 ]
 
 VERSIONED_ROUTERS = [cameras.router, *PUBLIC_ROUTERS, queue_management.router]
