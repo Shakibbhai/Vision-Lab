@@ -10,10 +10,10 @@ export async function middleware(req: NextRequest) {
   if (req.nextUrl.pathname.startsWith("/api/")) {
     return NextResponse.json({ detail: "Not authenticated" }, { status: 401 });
   }
-  const login = new URL("/login", req.url);
+  // Relative Location: behind the proxy req.url carries the internal host (localhost:13000)
   const next = `${req.nextUrl.pathname}${req.nextUrl.search}`;
-  if (next !== "/") login.searchParams.set("next", next);
-  return NextResponse.redirect(login);
+  const location = next === "/" ? "/login" : `/login?next=${encodeURIComponent(next)}`;
+  return new NextResponse(null, { status: 307, headers: { Location: location } });
 }
 
 export const config = {
